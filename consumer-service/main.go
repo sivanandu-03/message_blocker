@@ -10,7 +10,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/streadway/amqp"
 )
-
+            
 func main() {
 	db, _ := sql.Open("postgres", os.Getenv("DATABASE_URL"))
 	conn, _ := amqp.Dial(os.Getenv("BROKER_URL"))
