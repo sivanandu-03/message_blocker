@@ -6,7 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
+	"time"
 
 	_ "github.com/lib/pq"
 )
@@ -15,42 +15,102 @@ var db *sql.DB
 
 func main() {
 
-	conn := os.Getenv("DATABASE_URL")
-
-	db, _ = sql.Open("postgres", conn)
+	connectDB()
 
 	http.HandleFunc("/health", health)
 
-	http.HandleFunc("/api/analytics/products/", productSales)
+	http.HandleFunc("/api/products", getProducts)
+	http.HandleFunc("/api/orders", getOrders)
 
 	log.Println("Query Service running 8081")
 
 	http.ListenAndServe(":8081", nil)
 }
 
+func connectDB() {
+
+	connStr := os.Getenv("DATABASE_URL")
+
+	var err error
+
+	for i := 0; i < 10; i++ {
+
+		db, err = sql.Open("postgres", connStr)
+
+		if err == nil {
+
+			err = db.Ping()
+
+			if err == nil {
+				return
+			}
+		}
+
+		log.Println("Waiting for DB...")
+		time.Sleep(2 * time.Second)
+	}
+
+	log.Fatal(err)
+}
+
 func health(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 }
 
-func productSales(w http.ResponseWriter, r *http.Request) {
+func getProducts(w http.ResponseWriter, r *http.Request) {
 
-	idStr := r.URL.Path[len("/api/analytics/products/"):]
-	id, _ := strconv.Atoi(idStr)
+	rows, _ := db.Query(`
+SELECT id,name,category,price,stock
+FROM products`)
 
-	var qty int
-	var revenue float64
-	var count int
+	defer rows.Close()
 
-	db.QueryRow(`
-SELECT total_quantity_sold,total_revenue,order_count
-FROM product_sales_view
-WHERE product_id=$1`,
-		id).Scan(&qty, &revenue, &count)
+	var result []map[string]interface{}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"productId":         id,
-		"totalQuantitySold": qty,
-		"totalRevenue":      revenue,
-		"orderCount":        count,
-	})
+	for rows.Next() {
+
+		var id int
+		var name, category string
+		var price float64
+		var stock int
+
+		rows.Scan(&id, &name, &category, &price, &stock)
+
+		result = append(result, map[string]interface{}{
+			"id":       id,
+			"name":     name,
+			"category": category,
+			"price":    price,
+			"stock":    stock,
+		})
+	}
+
+	json.NewEncoder(w).Encode(result)
+}
+
+func getOrders(w http.ResponseWriter, r *http.Request) {
+
+	rows, _ := db.Query(`
+SELECT id,customer_id,total
+FROM orders`)
+
+	defer rows.Close()
+
+	var result []map[string]interface{}
+
+	for rows.Next() {
+
+		var id, customer int
+		var total float64
+
+		rows.Scan(&id, &customer, &total)
+
+		result = append(result, map[string]interface{}{
+			"id":         id,
+			"customerId": customer,
+			"total":      total,
+		})
+	}
+
+	json.NewEncoder(w).Encode(result)
 }

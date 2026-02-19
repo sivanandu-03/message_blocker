@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	_ "github.com/lib/pq"
 )
@@ -35,14 +36,29 @@ func main() {
 	connStr := os.Getenv("DATABASE_URL")
 
 	var err error
-	db, err = sql.Open("postgres", connStr)
+
+	for i := 0; i < 10; i++ {
+
+		db, err = sql.Open("postgres", connStr)
+
+		if err == nil {
+
+			err = db.Ping()
+
+			if err == nil {
+				break
+			}
+		}
+
+		log.Println("Waiting for DB...")
+		time.Sleep(2 * time.Second)
+	}
 
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	http.HandleFunc("/health", health)
-
 	http.HandleFunc("/api/products", createProduct)
 	http.HandleFunc("/api/orders", createOrder)
 
@@ -85,14 +101,26 @@ func createOrder(w http.ResponseWriter, r *http.Request) {
 
 	json.NewDecoder(r.Body).Decode(&o)
 
-	tx, _ := db.Begin()
+	tx, err := db.Begin()
+
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 
 	var orderID int
 
-	tx.QueryRow(`
+	err = tx.QueryRow(`
 INSERT INTO orders(customer_id,total)
 VALUES($1,0)
-RETURNING id`, o.CustomerID).Scan(&orderID)
+RETURNING id`,
+		o.CustomerID).Scan(&orderID)
+
+	if err != nil {
+		tx.Rollback()
+		http.Error(w, err.Error(), 500)
+		return
+	}
 
 	total := 0.0
 
