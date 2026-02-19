@@ -8,32 +8,82 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
-	"github.com/streadway/amqp"
 )
-            
+
+var db *sql.DB
+
 func main() {
-	db, _ := sql.Open("postgres", os.Getenv("DATABASE_URL"))
-	conn, _ := amqp.Dial(os.Getenv("BROKER_URL"))
-	ch, _ := conn.Channel()
-	q, _ := ch.QueueDeclare("order-events", true, false, false, false, nil)
 
-	msgs, _ := ch.Consume(q.Name, "", true, false, false, false, nil)
+	connStr := os.Getenv("DATABASE_URL")
 
-	for d := range msgs {
-		var ev map[string]interface{}
-		json.Unmarshal(d.Body, &ev)
+	var err error
 
-		// Example: Update Customer LTV View
+	// retry connection until DB ready
+	for i := 0; i < 10; i++ {
+
+		db, err = sql.Open("postgres", connStr)
+
+		if err == nil {
+
+			err = db.Ping()
+
+			if err == nil {
+				break
+			}
+		}
+
+		log.Println("Waiting for DB...")
+		time.Sleep(3 * time.Second)
+	}
+
+	if err != nil {
+		log.Fatal("Cannot connect to DB:", err)
+	}
+
+	log.Println("Consumer started")
+
+	for {
+
+		process()
+
+		time.Sleep(3 * time.Second)
+	}
+}
+
+func process() {
+
+	rows, err := db.Query(`
+SELECT id,payload FROM outbox
+WHERE published_at IS NULL`)
+
+	if err != nil {
+
+		log.Println("Query error:", err)
+		return
+	}
+
+	defer rows.Close()
+
+	for rows.Next() {
+
+		var id int
+		var payload []byte
+
+		err := rows.Scan(&id, &payload)
+
+		if err != nil {
+			continue
+		}
+
+		var event map[string]interface{}
+
+		json.Unmarshal(payload, &event)
+
+		log.Println("Processing event:", event)
+
 		db.Exec(`
-			INSERT INTO customer_ltv_view (customer_id, total_spent, order_count, last_order_date)
-			VALUES ($1, $2, 1, $3)
-			ON CONFLICT (customer_id) DO UPDATE SET
-			total_spent = customer_ltv_view.total_spent + EXCLUDED.total_spent,
-			order_count = customer_ltv_view.order_count + 1,
-			last_order_date = EXCLUDED.last_order_date
-		`, ev["customerId"], 0, ev["timestamp"])
-
-		db.Exec("UPDATE sync_status SET last_event_time = $1 WHERE id = 1", ev["timestamp"])
-		log.Printf("Processed event for order %v", ev["orderId"])
+UPDATE outbox
+SET published_at = NOW()
+WHERE id = $1`, id)
 	}
 }
