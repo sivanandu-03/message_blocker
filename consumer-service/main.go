@@ -2,126 +2,155 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"log"
 	"os"
 	"time"
 
-	"github.com/streadway/amqp"
 	_ "github.com/lib/pq"
+	"github.com/streadway/amqp"
 )
 
 var db *sql.DB
-var channel *amqp.Channel
 
-func main() {
-
-	connectDB()
-	connectRabbit()
-
-	log.Println("Consumer started")
-
-	for {
-
-		process()
-
-		time.Sleep(2 * time.Second)
-	}
+// Event structure from outbox
+type OrderCreatedEvent struct {
+	EventType  string  `json:"eventType"`
+	OrderID    int     `json:"orderId"`
+	CustomerID int     `json:"customerId"`
+	Total      float64 `json:"total"`
 }
 
-func connectDB() {
+func connectDB() *sql.DB {
 
 	connStr := os.Getenv("DATABASE_URL")
 
-	var err error
-
-	for i := 0; i < 10; i++ {
-
-		db, err = sql.Open("postgres", connStr)
-
-		if err == nil {
-
-			err = db.Ping()
-
-			if err == nil {
-				return
-			}
-		}
-
-		log.Println("Waiting for DB...")
-		time.Sleep(2 * time.Second)
-	}
-
-	log.Fatal(err)
-}
-
-func connectRabbit() {
-
-	url := "amqp://guest:guest@broker:5672/"
-
-	var err error
-
-	for i := 0; i < 10; i++ {
-
-		conn, err := amqp.Dial(url)
-
-		if err == nil {
-
-			channel, err = conn.Channel()
-
-			if err == nil {
-				return
-			}
-		}
-
-		log.Println("Waiting for RabbitMQ...")
-		time.Sleep(2 * time.Second)
-	}
-
-	log.Fatal(err)
-}
-
-func process() {
-
-	rows, err := db.Query(`
-SELECT id, topic, payload
-FROM outbox
-WHERE published_at IS NULL`)
-
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	defer rows.Close()
-
-	for rows.Next() {
-
-		var id int
-		var topic string
-		var payload []byte
-
-		rows.Scan(&id, &topic, &payload)
-
-		err := channel.Publish(
-			"",
-			topic,
-			false,
-			false,
-			amqp.Publishing{
-				ContentType: "application/json",
-				Body:        payload,
-			},
-		)
+	for {
+		db, err := sql.Open("postgres", connStr)
 
 		if err != nil {
+			log.Println("Waiting for DB...")
+			time.Sleep(3 * time.Second)
 			continue
 		}
 
-		db.Exec(`
-UPDATE outbox
-SET published_at = NOW()
-WHERE id=$1`, id)
+		err = db.Ping()
 
-		log.Println("Published event:", id)
+		if err != nil {
+			log.Println("Waiting for DB...")
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		log.Println("Connected to DB")
+		return db
 	}
+}
+
+func connectRabbitMQ() *amqp.Connection {
+
+	url := "amqp://guest:guest@broker:5672/"
+
+	for {
+		conn, err := amqp.Dial(url)
+
+		if err != nil {
+			log.Println("Waiting for RabbitMQ...")
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		log.Println("Connected to RabbitMQ")
+		return conn
+	}
+}
+
+func main() {
+
+	// Connect DB
+	db = connectDB()
+	defer db.Close()
+
+	// Connect RabbitMQ
+	conn := connectRabbitMQ()
+	defer conn.Close()
+
+	ch, err := conn.Channel()
+
+	if err != nil {
+		log.Fatal("Channel error:", err)
+	}
+
+	defer ch.Close()
+
+	// Declare Queue
+	q, err := ch.QueueDeclare(
+		"order-events",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+
+	if err != nil {
+		log.Fatal("Queue declare error:", err)
+	}
+
+	// Consume messages
+	msgs, err := ch.Consume(
+		q.Name,
+		"",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+
+	if err != nil {
+		log.Fatal("Consume error:", err)
+	}
+
+	log.Println("Consumer Service Started")
+
+	forever := make(chan bool)
+
+	go func() {
+
+		for msg := range msgs {
+
+			var event OrderCreatedEvent
+
+			err := json.Unmarshal(msg.Body, &event)
+
+			if err != nil {
+				log.Println("JSON error:", err)
+				continue
+			}
+
+			log.Println("Received Order:", event.OrderID)
+
+			// Insert into read model
+			_, err = db.Exec(`
+				INSERT INTO orders_read(order_id, customer_id, total)
+				VALUES ($1,$2,$3)
+				ON CONFLICT (order_id) DO NOTHING
+			`,
+				event.OrderID,
+				event.CustomerID,
+				event.Total,
+			)
+
+			if err != nil {
+				log.Println("DB insert error:", err)
+				continue
+			}
+
+			log.Println("Saved to read DB:", event.OrderID)
+		}
+
+	}()
+
+	<-forever
 }

@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: write_db
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U user -d write_db"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -21,6 +21,11 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   command-service:
     build: ./command-service
@@ -29,7 +34,8 @@ services:
     environment:
       DATABASE_URL: postgres://user:password@db:5432/write_db?sslmode=disable
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
   query-service:
     build: ./query-service
@@ -38,7 +44,8 @@ services:
     environment:
       DATABASE_URL: postgres://user:password@db:5432/write_db?sslmode=disable
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
   consumer-service:
     build: ./consumer-service
@@ -46,4 +53,6 @@ services:
       DATABASE_URL: postgres://user:password@db:5432/write_db?sslmode=disable
     depends_on:
       db:
+        condition: service_healthy
+      broker:
         condition: service_healthy
